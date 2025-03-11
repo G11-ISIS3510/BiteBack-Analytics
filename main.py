@@ -66,7 +66,7 @@ async def setup(db: db_dependency):
 
         # Save the analytics database
         db.commit()
-        return {'message' : 'Analytics database updated'}
+        return {'message' : 'Analytics database updated [homepage_load_time]'}
     
     except Exception as e:
         # Rollback if any error happens
@@ -126,7 +126,7 @@ async def setup(db: db_dependency):
             
         # Save the analytics database
         db.commit()
-        return {'message' : 'Analytics database updated'}
+        return {'message' : 'Analytics database updated [restaurant_reviews]'}
     
     except Exception as e:
         # Rollback if any error happens
@@ -181,7 +181,7 @@ async def setup(db: db_dependency):
             
         # Save the analytics database
         db.commit()
-        return {'message' : 'Analytics database updated'}
+        return {'message' : 'Analytics database updated [filter_buttons_usage]'}
     
     except Exception as e:
         # Rollback if any error happens
@@ -237,7 +237,7 @@ async def setup(db: db_dependency):
 
         # Save the analytics database
         db.commit()
-        return {'message' : 'Analytics database updated'}
+        return {'message' : 'Analytics database updated [food_listing]'}
     
     except Exception as e:
         # Rollback if any error happens
