@@ -5,3 +5,4 @@ uvicorn
 firebase_admin
 pandas
 faker
+nltk
