@@ -29,4 +29,10 @@ class FoodListing(Base):
     count = Column(Integer, index = True)
     percentage = Column(Float, index = True)
 
-    
+class SearchesAnalytics(Base):
+    __tablename__ = 'searches_analytics'
+    id = Column(String, primary_key=True, index=True)
+    search_term = Column(String, index=True)
+    count = Column(Integer, index=True)
+    normalized_term = Column(String, index=True)
+    percentage = Column(Float, index=True)

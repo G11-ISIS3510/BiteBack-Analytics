@@ -6,6 +6,14 @@ from sqlalchemy.orm import Session
 from typing import Annotated
 import pandas as pd
 import models
+import re
+from collections import Counter
+from difflib import get_close_matches
+import nltk
+from nltk.stem import WordNetLemmatizer
+
+nltk.download('wordnet')
+nltk.download('omw-1.4')
 
 
 creds = credentials.Certificate('biteback-89c7a-firebase-adminsdk-fbsvc-5ce126e950.json')
@@ -26,6 +34,7 @@ def get_DB():
 
 db_dependency = Annotated[Session, Depends(get_DB)]
 
+lemmatizer = WordNetLemmatizer()
 
 @app.get('/')
 async def root():
@@ -244,6 +253,93 @@ async def setup(db: db_dependency):
         db.rollback()
         return {'error' : str(e)}
 
+def normalize_text(text):
+    text = text.lower()
+    text = re.sub(r'[^a-zA-Z0-9 ]', '', text)  # Remove special characters
+    text = ' '.join([lemmatizer.lemmatize(word) for word in text.split()])  # English lemmatization
+    return text.strip()
+
+@app.get('/search-analytics')
+async def setup(db: db_dependency):
+    try:
+        # Retrieving information from firestore database
+        docs = firestore_DB.collection('searches').stream()
+
+        # Turning documents into a pandas dataframe
+        docs_array = []
+        for doc in docs:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            docs_array.append(data)
+        docs_df = pd.DataFrame(docs_array)
+
+        if docs_df.empty:
+            return {'message': 'There is no data about searches'}
+        
+        # Normalize search terms
+        docs_df['normalized_term'] = docs_df['text'].apply(normalize_text)
+        
+        # Count occurrences of each term
+        term_counts = Counter(docs_df['normalized_term'])
+        total_count = sum(term_counts.values())
+        
+        # Group close matches
+        unique_terms = list(term_counts.keys())
+        grouped_terms = {}
+
+        for term in unique_terms:
+            match = get_close_matches(term, grouped_terms.keys(), n=1, cutoff=0.8)
+            if match:
+                grouped_terms[match[0]] += term_counts[term]
+            else:
+                grouped_terms[term] = term_counts[term]
+        
+        # Convert to DataFrame
+        analytics_df = pd.DataFrame(grouped_terms.items(), columns=['normalized_term', 'count'])
+        analytics_df['percentage'] = round((analytics_df['count'] / total_count) * 100, 2)
+        analytics_df['id'] = analytics_df['normalized_term']
+
+        # Iterate over the dataframe and update analytics database
+        for _, row in analytics_df.iterrows():
+            existing_entry = db.query(models.SearchesAnalytics).filter(
+                models.SearchesAnalytics.normalized_term == row['normalized_term']
+            ).first()
+            
+            # If the entry doesnt exist in the analytics database, insert it
+            if not existing_entry:
+                new_entry = models.SearchesAnalytics(
+                    id=row['id'],
+                    search_term=row['normalized_term'],
+                    count=row['count'],
+                    normalized_term=row['normalized_term'],
+                    percentage=row['percentage']
+                )
+                db.add(new_entry)
+            else:
+                # Update search count and percentage
+                existing_entry.count = row['count']
+                existing_entry.percentage = row['percentage']
+                db.commit()
+        
+        db.commit()
+        return {'message': 'Analytics database updated [searches_analytics]'}
+    
+    except Exception as e:
+        db.rollback()
+        return {'error': str(e)}
+
+@app.get('/clean-search-analytics')
+def setup(db: Session = Depends(get_DB)):
+    try:
+        # Delete all information on the table
+        db.query(models.SearchesAnalytics).delete()
+        db.commit()
+        return {'message': 'search-analytics cleaned'}
+    
+    except Exception as e:
+        # Rollback if any error happens
+        db.rollback()  
+        return {"error": str(e)}
 
 @app.get('/clean-homepage-load-time')
 def setup(db: Session = Depends(get_DB)):
