@@ -36,3 +36,17 @@ class SearchesAnalytics(Base):
     count = Column(Integer, index=True)
     normalized_term = Column(String, index=True)
     percentage = Column(Float, index=True)
+    
+class ClickInteraction(Base):
+    __tablename__ = 'click_interaction'
+    id = Column(String, primary_key=True, index=True)
+    category_product_name = Column(String, index=True)
+    week = Column(Integer, index=True)
+    year = Column(Integer, index=True)
+    click_count = Column(Integer, index=True)
+    
+class PopularityIndex(Base):
+    __tablename__ = 'popularity_index'
+    id = Column(String, primary_key=True, index=True)
+    category = Column(String, index=True)
+    popularity_score = Column(Float, index=True)

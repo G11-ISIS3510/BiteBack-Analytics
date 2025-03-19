@@ -11,6 +11,7 @@ from collections import Counter
 from difflib import get_close_matches
 import nltk
 from nltk.stem import WordNetLemmatizer
+from datetime import datetime
 
 nltk.download('wordnet')
 nltk.download('omw-1.4')
@@ -327,6 +328,155 @@ async def setup(db: db_dependency):
     except Exception as e:
         db.rollback()
         return {'error': str(e)}
+
+
+@app.get('/click-interactions')
+async def process_clicks(db: db_dependency):
+    try:
+        # Retrieving click interaction data from Firestore
+        docs = firestore_DB.collection('click_interaction').stream()
+
+        # Turning documents into a pandas dataframe
+        docs_array = []
+        for doc in docs:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            docs_array.append(data)
+        docs_df = pd.DataFrame(docs_array)
+
+        if docs_df.empty:
+            return {'message': 'There is no data about click interactions'}
+        
+        # Ensure timestamp column exists and convert to datetime
+        if 'timestamp' in docs_df.columns:
+            docs_df['timestamp'] = pd.to_datetime(docs_df['timestamp'], errors='coerce')
+            docs_df = docs_df.dropna(subset=['timestamp'])  # Remove rows where timestamp is NaT
+        else:
+            return {'message': 'Missing timestamp data'}
+        
+        # Extract week and year from timestamp
+        docs_df['week'] = docs_df['timestamp'].dt.isocalendar().week
+        docs_df['year'] = docs_df['timestamp'].dt.isocalendar().year
+        
+        # Group by category, week, and year, counting interactions
+        df_grouped = docs_df.groupby(['category-product-name', 'year', 'week']).agg(
+            click_count=('id', 'count')
+        ).reset_index()
+        df_grouped = df_grouped.sort_values(by=['year', 'week', 'category-product-name'])
+        
+        # Iterate over the dataframe and update the database
+        for _, row in df_grouped.iterrows():
+            existing_entry = db.query(models.ClickInteraction).filter(
+                models.ClickInteraction.category_product_name == row['category-product-name'],
+                models.ClickInteraction.week == row['week'],
+                models.ClickInteraction.year == row['year']
+            ).first()
+            
+            # If the entry does not exist, insert it
+            if not existing_entry:
+                new_entry = models.ClickInteraction(
+                    id=f"{row['category-product-name']}_{row['year']}_{row['week']}",
+                    category_product_name=row['category-product-name'],
+                    week=row['week'],
+                    year=row['year'],
+                    click_count=row['click_count']
+                )
+                db.add(new_entry)
+            else:
+                # Update existing entry if necessary
+                existing_entry.click_count = row['click_count']
+                db.commit()
+        
+        db.commit()
+        return {'message': 'Analytics database updated [click_interaction]'}
+    
+    except Exception as e:
+        db.rollback()
+        return {'error': str(e)}
+    
+@app.get('/calculate-popularity')
+async def calculate_popularity(db: db_dependency):
+    try:
+        # Fetching data from tables
+        searches = pd.read_sql(db.query(models.SearchesAnalytics).statement, db.bind)
+        filters = pd.read_sql(db.query(models.FilterButtonsUsage).statement, db.bind)
+        clicks = pd.read_sql(db.query(models.ClickInteraction).statement, db.bind)
+
+        # Ensure category fields are strings
+        searches["normalized_term"] = searches["normalized_term"].astype(str)
+        filters["filter_name"] = filters["filter_name"].astype(str)
+        clicks["category_product_name"] = clicks["category_product_name"].astype(str)
+
+        # Normalizing metrics
+        def min_max_normalize(series):
+            return (series - series.min()) / (series.max() - series.min()) if series.max() != series.min() else series
+
+        searches["S_norm"] = min_max_normalize(searches["count"])
+        filters["F_norm"] = min_max_normalize(filters["count"])
+        clicks["C_norm"] = min_max_normalize(clicks["click_count"])
+
+        # Merging data
+        popularity_df = searches.merge(clicks, left_on="normalized_term", right_on="category_product_name", how="outer").fillna(0)
+        popularity_df = popularity_df.merge(filters, left_on="normalized_term", right_on="filter_name", how="outer").fillna(0)
+
+        # Calculating popularity score
+        w1, w2, w3 = 0.2, 0.3, 0.5
+        popularity_df["popularity_score"] = (w1 * popularity_df["S_norm"]) + (w2 * popularity_df["F_norm"]) + (w3 * popularity_df["C_norm"])
+        popularity_df["popularity_score"] *= 100  # Scaling to 0-100
+
+        # Storing results in the database
+        for _, row in popularity_df.iterrows():
+            category_value = row['normalized_term'] if row['normalized_term'] != '0' else None
+            if category_value:
+                entry_id = f"{category_value}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+                existing_entry = db.query(models.PopularityIndex).filter(
+                    models.PopularityIndex.category == category_value
+                ).first()
+                
+                if not existing_entry:
+                    new_entry = models.PopularityIndex(
+                        id=entry_id,
+                        category=category_value,
+                        popularity_score=row['popularity_score']
+                    )
+                    db.add(new_entry)
+                else:
+                    existing_entry.popularity_score = row['popularity_score']
+                    db.commit()
+
+        db.commit()
+        return {"message": "Popularity index calculated and stored successfully"}
+    
+    except Exception as e:
+        db.rollback()
+        return {"error": str(e)}
+    
+    
+@app.get('/clean-popularity')
+def setup(db: Session = Depends(get_DB)):
+    try:
+        # Delete all information on the table
+        db.query(models.PopularityIndex).delete()
+        db.commit()
+        return {'message': 'PopularityIndex cleaned'}
+    
+    except Exception as e:
+        # Rollback if any error happens
+        db.rollback()  
+        return {"error": str(e)}
+
+@app.get('/clean-click-interactions')
+def setup(db: Session = Depends(get_DB)):
+    try:
+        # Delete all information on the table
+        db.query(models.ClickInteraction).delete()
+        db.commit()
+        return {'message': 'click-interactions cleaned'}
+    
+    except Exception as e:
+        # Rollback if any error happens
+        db.rollback()  
+        return {"error": str(e)}
 
 @app.get('/clean-search-analytics')
 def setup(db: Session = Depends(get_DB)):
