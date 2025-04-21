@@ -50,3 +50,25 @@ class PopularityIndex(Base):
     id = Column(String, primary_key=True, index=True)
     category = Column(String, index=True)
     popularity_score = Column(Float, index=True)
+
+class UserDevices(Base):
+    __tablename__ = 'user_devices'
+    device_model = Column(String, primary_key=True, index=True)
+    user_count = Column(Integer, index=True)
+
+class TopProductsByWeek(Base):
+    __tablename__ = 'top_products_by_week'
+    id = Column(String, primary_key=True, index=True)
+    product_id = Column(String, index=True)
+    name = Column(String, index=True)
+    quantity = Column(Integer)
+    week = Column(Integer)
+    year = Column(Integer)
+
+class CheckoutSessionStats(Base):
+    __tablename__ = 'checkout_session_stats'
+    id = Column(String, primary_key=True, index=True)
+    week = Column(Integer)
+    year = Column(Integer)
+    avg_duration = Column(Float)
+
