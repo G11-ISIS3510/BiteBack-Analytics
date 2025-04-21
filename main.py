@@ -1,4 +1,4 @@
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, firestore, initialize_app
 from database import engine, SessionLocal
 from fastapi import FastAPI, Depends
 import firebase_admin as fire_admin
@@ -36,6 +36,7 @@ def get_DB():
 db_dependency = Annotated[Session, Depends(get_DB)]
 
 lemmatizer = WordNetLemmatizer()
+
 
 @app.get('/')
 async def root():
@@ -449,6 +450,155 @@ async def calculate_popularity(db: db_dependency):
     
     except Exception as e:
         db.rollback()
+        return {"error": str(e)}
+    
+@app.get('/users-by-device')
+async def users_by_device(db: db_dependency):
+    try:
+        # Traer todos los documentos de la colección 'users'
+        docs = firestore_DB.collection('users').stream()
+
+        devices = {}
+        for doc in docs:
+            data = doc.to_dict()
+            device_model = data.get('device_model', 'Unknown')
+
+            # Contar ocurrencias por modelo
+            if device_model in devices:
+                devices[device_model] += 1
+            else:
+                devices[device_model] = 1
+
+        # Guardar en PostgreSQL
+        for device, count in devices.items():
+            existing_entry = db.query(models.UserDevices).filter(
+                models.UserDevices.device_model == device
+            ).first()
+
+            if not existing_entry:
+                new_entry = models.UserDevices(
+                    device_model=device,
+                    user_count=count
+                )
+                db.add(new_entry)
+            else:
+                existing_entry.user_count = count
+
+        db.commit()
+        return {'message': 'User devices aggregated and stored successfully'}
+
+    except Exception as e:
+        db.rollback()
+        return {'error': str(e)}
+
+@app.get('/clean-users-by-device')
+def setup(db: Session = Depends(get_DB)):
+    try:
+        # Delete all information on the table
+        db.query(models.UserDevices).delete()
+        db.commit()
+        return {'message': 'UserDevices cleaned'}
+    
+    except Exception as e:
+        # Rollback if any error happens
+        db.rollback()  
+        return {"error": str(e)} 
+
+@app.get("/checkout-session-analytics")
+async def process_checkout_sessions(db: db_dependency):
+    print("🔍 Iniciando procesamiento de sesiones de checkout...")
+
+    records = []
+    durations = []
+    processed_docs = 0
+
+    user_docs = firestore_DB.collection('checkout_sessions').list_documents()
+    uids = [doc.id for doc in user_docs]
+    print(f"🧾 UIDs encontrados: {uids}")
+
+    for uid in uids:
+        entry_docs = firestore_DB.collection(f'checkout_sessions/{uid}/entries').stream()
+        for entry_doc in entry_docs:
+            data = entry_doc.to_dict()
+            print(f"📦 Procesando entrada: {entry_doc.id} de usuario {uid}")
+            print("🧾 Contenido:", data)
+
+            processed_docs += 1
+
+            if 'completed_at' in data and 'duration_ms' in data and 'items' in data:
+                ts = pd.to_datetime(data['completed_at'].isoformat())
+                week = ts.isocalendar().week
+                year = ts.isocalendar().year
+
+                durations.append({
+                    'id': f"{uid}_{year}_{week}",
+                    'week': week,
+                    'year': year,
+                    'avg_duration': data['duration_ms']
+                })
+
+                for item in data['items']:
+                    records.append({
+                        'id': f"{uid}_{item['product_id']}_{year}_{week}",
+                        'product_id': item['product_id'],
+                        'name': item['name'],
+                        'quantity': item['quantity'],
+                        'week': week,
+                        'year': year
+                    })
+
+    print(f"📊 Total documentos procesados: {processed_docs}")
+
+    product_df = pd.DataFrame(records)
+    duration_df = pd.DataFrame(durations)
+
+    if not product_df.empty:
+        grouped = product_df.groupby(['product_id', 'name', 'week', 'year']).agg(
+            quantity=('quantity', 'sum')).reset_index()
+        grouped['id'] = grouped.apply(lambda r: f"{r['product_id']}_{r['year']}_{r['week']}", axis=1)
+
+        for _, row in grouped.iterrows():
+            existing = db.query(models.TopProductsByWeek).filter(models.TopProductsByWeek.id == row['id']).first()
+            if not existing:
+                entry = models.TopProductsByWeek(**row)
+                db.add(entry)
+            else:
+                existing.quantity = row['quantity']
+        db.commit()
+    else:
+        print("⚠️ No se encontraron productos para procesar")
+
+    if not duration_df.empty:
+        grouped_dur = duration_df.groupby(['week', 'year']).agg(
+            avg_duration=('avg_duration', 'mean')).reset_index()
+        grouped_dur['id'] = grouped_dur.apply(lambda r: f"{r['year']}_{r['week']}", axis=1)
+
+        for _, row in grouped_dur.iterrows():
+            existing = db.query(models.CheckoutSessionStats).filter(models.CheckoutSessionStats.id == row['id']).first()
+            if not existing:
+                entry = models.CheckoutSessionStats(**row)
+                db.add(entry)
+            else:
+                existing.avg_duration = row['avg_duration']
+        db.commit()
+    else:
+        print("⚠️ No se encontraron duraciones para procesar")
+
+    return {'message': 'Checkout session analytics processed ✅'}
+
+    
+@app.get('/clean-checkout-session-analytics')
+def setup(db: Session = Depends(get_DB)):
+    try:
+        # Delete all information on the table
+        db.query(models.CheckoutDuration).delete()
+        db.query(models.TopProductWeekly).delete()
+        db.commit()
+        return {'message': 'PopularityIndex cleaned'}
+    
+    except Exception as e:
+        # Rollback if any error happens
+        db.rollback()  
         return {"error": str(e)}
     
     
