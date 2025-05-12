@@ -674,6 +674,74 @@ async def checkout_time_analysis(db: db_dependency):
         return {"error": str(e)}
 
 
+def upsert_checkout_summary(db: Session, day_of_week: str, type_: str, count: int):
+    existing = db.query(models.CheckoutSummaryAnalytics).filter_by(
+        day_of_week=day_of_week,
+        type=type_
+    ).first()
+
+    if existing:
+        existing.sales_count = count
+        existing.timestamp = datetime.utcnow()
+    else:
+        db.add(models.CheckoutSummaryAnalytics(
+            day_of_week=day_of_week,
+            sales_count=count,
+            type=type_
+        ))
+
+
+@app.get("/checkout-summary")
+async def checkout_summary(db: db_dependency):
+    try:
+        # 1. Leer Firestore
+        docs = firestore_DB.collection('purchases').stream()
+        docs_array = [doc.to_dict() for doc in docs]
+
+        df = pd.DataFrame(docs_array)
+
+        if df.empty:
+            return {"message": "No purchase data available."}
+
+        # 2. Total olvidos de pago
+        forgotten_count = df[df['elapsedTimeMillis'].isnull()].shape[0]
+
+        # Guardar olvidos (day_of_week=None, type='forgotten')
+        upsert_checkout_summary(db, None, "forgotten", forgotten_count)
+
+
+        # 3. Ventas completadas
+        df_completed = df[df['elapsedTimeMillis'].notnull()].copy()
+
+        sales_by_day = {}
+
+        if not df_completed.empty:
+            # Normalizar columna
+            df_completed['day_of_week'] = df_completed['day_of_week'].astype(str).str.strip().str.capitalize()
+
+            # Agrupar por día
+            grouped = df_completed.groupby('day_of_week').size().to_dict()
+            sales_by_day = dict(sorted(grouped.items(), key=lambda x: x[1], reverse=True))
+
+            # Guardar cada día como registro en la BD
+            for day, count in sales_by_day.items():
+                upsert_checkout_summary(db, day, "completed", int(count))
+
+        # Commit final
+        try:
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            print("Error al guardar en PostgreSQL:", e)
+
+        return {
+            "forgotten_checkouts": forgotten_count,
+            "sales_by_day": sales_by_day
+        }
+
+    except Exception as e:
+        db.rollback()
+        return {"error": str(e)}
 
 
     

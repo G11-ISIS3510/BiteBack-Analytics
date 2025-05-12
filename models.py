@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, Float, String, DateTime
+from sqlalchemy import Column, Integer, Float, String, DateTime, UniqueConstraint
 from database import Base
 from datetime import datetime
 class HomepageLoadInformation(Base):
@@ -80,3 +80,17 @@ class CheckoutTimeAnalytics(Base):
     day_of_week = Column(String, nullable=True)  
     hour = Column(Integer, nullable=True)        
     timestamp = Column(DateTime, default=datetime.utcnow)
+
+
+class CheckoutSummaryAnalytics(Base):
+    __tablename__ = "checkout_summary_analytics"
+
+    id = Column(Integer, primary_key=True, index=True)
+    day_of_week = Column(String, nullable=True)  # None para 'forgotten'
+    sales_count = Column(Integer, nullable=False)
+    type = Column(String, nullable=False)  # 'forgotten' o 'completed'
+    timestamp = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint('day_of_week', 'type', name='unique_day_type'),
+    )
