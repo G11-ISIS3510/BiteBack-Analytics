@@ -586,6 +586,164 @@ async def process_checkout_sessions(db: db_dependency):
 
     return {'message': 'Checkout session analytics processed ✅'}
 
+
+
+@app.get("/avg-checkout-time")
+async def checkout_time_analysis(db: db_dependency):
+    try:
+        # 1. Obtener documentos de Firestore
+        docs = firestore_DB.collection('purchases').stream()
+        docs_array = []
+        for doc in docs:
+           
+            data = doc.to_dict()
+            data['id'] = doc.id
+            docs_array.append(data)
+
+        df = pd.DataFrame(docs_array)
+   
+        if df.empty:
+            return {'message': 'No checkout session data available'}
+
+        # 2. Filtrar compras completadas
+        df_completed = df[df['elapsedTimeMillis'].notnull()].copy()
+        if df_completed.empty:
+            return {'message': 'No completed purchases found'}
+
+        # 3. Convertir tiempos
+        df_completed['elapsed_minutes'] = df_completed['elapsedTimeMillis'] / 60000
+
+        # 4. Calcular promedios
+        general_avg = round(df_completed['elapsed_minutes'].mean(), 2)
+
+        # Promedio por día de la semana
+        df_completed['day_of_week'] = df_completed['day_of_week'].astype(str)
+        avg_by_day = df_completed.groupby('day_of_week')['elapsed_minutes'].mean().round(2).to_dict()
+
+        # Promedio por hora (extraído de 'time' string)
+        df_completed['hour'] = pd.to_datetime(df_completed['time'], format="%H:%M:%S").dt.hour
+        avg_by_hour = df_completed.groupby('hour')['elapsed_minutes'].mean().round(2).to_dict()
+        
+
+        print("Promedio general:", general_avg)
+        print("Por día:", avg_by_day)
+        print("Por hora:", avg_by_hour)
+
+
+        # 5. (Opcional) Guardar análisis en la base de datos
+        # Guardar promedio general
+      
+        db.add(models.CheckoutTimeAnalytics(
+            average_minutes=float(general_avg),  # o general_avg.item() si es np.float64
+            day_of_week=None,
+            hour=None
+        ))
+
+        # Guardar por día
+        for day, avg in avg_by_day.items():
+            db.add(models.CheckoutTimeAnalytics(
+                average_minutes=float(avg),
+                day_of_week=day,
+                hour=None
+            ))
+
+        # Guardar por hora
+        for hour, avg in avg_by_hour.items():
+            db.add(models.CheckoutTimeAnalytics(
+                average_minutes=float(avg),
+                day_of_week=None,
+                hour=int(hour)
+            ))
+
+        try:
+            db.commit()
+            print("Datos guardados correctamente.")
+        except Exception as e:
+            db.rollback()
+            print("Error al guardar:", e)
+
+        # 6. Devolver respuesta
+        return {
+            "general_average_minutes": general_avg,
+            "average_by_day_of_week": avg_by_day,
+            "average_by_hour": avg_by_hour
+        }
+
+    except Exception as e:
+        db.rollback()
+        return {"error": str(e)}
+
+
+def upsert_checkout_summary(db: Session, day_of_week: str, type_: str, count: int):
+    existing = db.query(models.CheckoutSummaryAnalytics).filter_by(
+        day_of_week=day_of_week,
+        type=type_
+    ).first()
+
+    if existing:
+        existing.sales_count = count
+        existing.timestamp = datetime.utcnow()
+    else:
+        db.add(models.CheckoutSummaryAnalytics(
+            day_of_week=day_of_week,
+            sales_count=count,
+            type=type_
+        ))
+
+
+@app.get("/checkout-summary")
+async def checkout_summary(db: db_dependency):
+    try:
+        # 1. Leer Firestore
+        docs = firestore_DB.collection('purchases').stream()
+        docs_array = [doc.to_dict() for doc in docs]
+
+        df = pd.DataFrame(docs_array)
+
+        if df.empty:
+            return {"message": "No purchase data available."}
+
+        # 2. Total olvidos de pago
+        forgotten_count = df[df['elapsedTimeMillis'].isnull()].shape[0]
+
+        # Guardar olvidos (day_of_week=None, type='forgotten')
+        upsert_checkout_summary(db, None, "forgotten", forgotten_count)
+
+
+        # 3. Ventas completadas
+        df_completed = df[df['elapsedTimeMillis'].notnull()].copy()
+
+        sales_by_day = {}
+
+        if not df_completed.empty:
+            # Normalizar columna
+            df_completed['day_of_week'] = df_completed['day_of_week'].astype(str).str.strip().str.capitalize()
+
+            # Agrupar por día
+            grouped = df_completed.groupby('day_of_week').size().to_dict()
+            sales_by_day = dict(sorted(grouped.items(), key=lambda x: x[1], reverse=True))
+
+            # Guardar cada día como registro en la BD
+            for day, count in sales_by_day.items():
+                upsert_checkout_summary(db, day, "completed", int(count))
+
+        # Commit final
+        try:
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            print("Error al guardar en PostgreSQL:", e)
+
+        return {
+            "forgotten_checkouts": forgotten_count,
+            "sales_by_day": sales_by_day
+        }
+
+    except Exception as e:
+        db.rollback()
+        return {"error": str(e)}
+
+
     
 @app.get('/clean-checkout-session-analytics')
 def setup(db: Session = Depends(get_DB)):
