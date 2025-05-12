@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, Float, String, DateTime
 from database import Base
-
+from datetime import datetime
 class HomepageLoadInformation(Base):
     __tablename__ = 'homepage_load_time'
     id = Column(String, primary_key = True, index = True)
@@ -72,3 +72,11 @@ class CheckoutSessionStats(Base):
     year = Column(Integer)
     avg_duration = Column(Float)
 
+class CheckoutTimeAnalytics(Base):
+    __tablename__ = "checkout_time_analytics"
+
+    id = Column(Integer, primary_key=True, index=True)
+    average_minutes = Column(Float)
+    day_of_week = Column(String, nullable=True)  
+    hour = Column(Integer, nullable=True)        
+    timestamp = Column(DateTime, default=datetime.utcnow)
