@@ -94,3 +94,31 @@ class CheckoutSummaryAnalytics(Base):
     __table_args__ = (
         UniqueConstraint('day_of_week', 'type', name='unique_day_type'),
     )
+    
+class CartpageLoadInformation(Base):
+    __tablename__ = 'cartpage_load_time'
+    id = Column(String, primary_key=True, index=True)
+    load_time = Column(Float, index=True)
+    timestamp = Column(DateTime, index=True)
+
+
+class ProductPairAnalytics(Base):
+    __tablename__ = 'product_pair_analytics'
+    id = Column(String, primary_key=True, index=True)
+    product_a = Column(String, index=True)
+    product_b = Column(String, index=True)
+    name_a = Column(String, index=True)
+    name_b = Column(String, index=True)
+    count = Column(Integer, index=True)
+
+
+class UserAndroidVersion(Base):
+    __tablename__ = 'user_android_versions'
+    android_version = Column(String, primary_key=True, index=True)
+    user_count = Column(Integer, index=True)
+
+
+class UserAndroidSDK(Base):
+    __tablename__ = 'user_android_sdks'
+    android_sdk = Column(String, primary_key=True, index=True)
+    user_count = Column(Integer, index=True)

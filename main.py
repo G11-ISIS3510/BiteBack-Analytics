@@ -17,6 +17,12 @@ nltk.download('wordnet')
 nltk.download('omw-1.4')
 
 
+"""from database import engine
+from models import Base
+Base.metadata.drop_all(bind=engine)
+Base.metadata.create_all(bind=engine)"""
+
+
 creds = credentials.Certificate('biteback-89c7a-firebase-adminsdk-fbsvc-5ce126e950.json')
 app = fire_admin.initialize_app(creds)
 firestore_DB = firestore.client()
@@ -742,6 +748,187 @@ async def checkout_summary(db: db_dependency):
     except Exception as e:
         db.rollback()
         return {"error": str(e)}
+
+# NUEVO ENDPOINT: Tiempo de carga CartScreen
+@app.get('/cartpage-load-time')
+async def load_cartpage_times(db: db_dependency):
+    try:
+        docs = firestore_DB.collection('cartpage_load_time').stream()
+        docs_array = []
+        for doc in docs:
+            data = doc.to_dict()
+            data['id'] = doc.id
+            docs_array.append(data)
+        df = pd.DataFrame(docs_array)
+
+        if df.empty:
+            return {'message': "No data found in cartpage_load_time"}
+
+        for _, row in df.iterrows():
+            exists = db.query(models.CartpageLoadInformation).filter_by(id=row['id']).first()
+            if not exists:
+                db.add(models.CartpageLoadInformation(
+                    id=row['id'],
+                    load_time=row['load_time'],
+                    timestamp=row['timestamp']
+                ))
+        db.commit()
+        return {'message': 'Analytics updated [cartpage_load_time]'}
+
+    except Exception as e:
+        db.rollback()
+        return {'error': str(e)}
+
+# NUEVO ENDPOINT: Pares de productos más comprados juntos
+@app.get("/most-common-product-pairs")
+async def most_common_product_pairs(db: db_dependency):
+    try:
+        user_docs = firestore_DB.collection('checkout_sessions').list_documents()
+        uids = [doc.id for doc in user_docs]
+        pairs = {}
+
+        for uid in uids:
+            entries = firestore_DB.collection(f'checkout_sessions/{uid}/entries').stream()
+            for entry in entries:
+                data = entry.to_dict()
+                if 'items' in data:
+                    items = sorted(data['items'], key=lambda x: x['product_id'])
+                    for i in range(len(items)):
+                        for j in range(i + 1, len(items)):
+                            a = items[i]
+                            b = items[j]
+                            pair_id = f"{a['product_id']}_{b['product_id']}"
+                            if pair_id not in pairs:
+                                pairs[pair_id] = {
+                                    "id": pair_id,  # ✅ Campo requerido por la tabla
+                                    "product_a": a['product_id'],
+                                    "product_b": b['product_id'],
+                                    "name_a": a.get('name', 'Producto A'),
+                                    "name_b": b.get('name', 'Producto B'),
+                                    "count": 1
+                                }
+                            else:
+                                pairs[pair_id]["count"] += 1
+
+        for pair_id, entry in pairs.items():
+            existing = db.query(models.ProductPairAnalytics).filter_by(id=pair_id).first()
+            if existing:
+                existing.count = entry["count"]
+            else:
+                db.add(models.ProductPairAnalytics(**entry))
+
+        db.commit()
+        return {'message': 'Product pairs saved to database'}
+
+    except Exception as e:
+        db.rollback()
+        return {'error': str(e)}
+
+
+# NUEVO ENDPOINT: Usuarios por versión de Android
+@app.get('/users-by-android-version')
+async def users_by_android_version(db: db_dependency):
+    try:
+        docs = firestore_DB.collection('users').stream()
+        versions = {}
+
+        for doc in docs:
+            data = doc.to_dict()
+            version = data.get('android_version', 'Unknown').strip()
+            if not version:
+                version = "Unknown"
+            versions[version] = versions.get(version, 0) + 1
+
+        for version, count in versions.items():
+            existing = db.query(models.UserAndroidVersion).filter_by(android_version=version).first()
+            if existing:
+                existing.user_count = count
+            else:
+                db.add(models.UserAndroidVersion(
+                    android_version=version,
+                    user_count=count
+                ))
+
+        db.commit()
+        return {'message': 'User Android versions aggregated and stored successfully'}
+
+    except Exception as e:
+        db.rollback()
+        return {'error': str(e)}
+
+# NUEVO ENDPOINT: Usuarios por SDK de Android
+@app.get('/users-by-android-sdk')
+async def users_by_android_sdk(db: db_dependency):
+    try:
+        docs = firestore_DB.collection('users').stream()
+        sdk_levels = {}
+
+        for doc in docs:
+            data = doc.to_dict()
+            sdk = data.get('android_sdk', 'Unknown')
+            sdk = str(sdk).strip() if sdk is not None else "Unknown"
+            if not sdk or sdk == "-1":
+                sdk = "Unknown"
+            sdk_levels[sdk] = sdk_levels.get(sdk, 0) + 1
+
+        for sdk, count in sdk_levels.items():
+            existing = db.query(models.UserAndroidSDK).filter_by(android_sdk=sdk).first()
+            if existing:
+                existing.user_count = count
+            else:
+                db.add(models.UserAndroidSDK(
+                    android_sdk=sdk,
+                    user_count=count
+                ))
+
+        db.commit()
+        return {'message': 'User Android SDKs aggregated and stored successfully'}
+
+    except Exception as e:
+        db.rollback()
+        return {'error': str(e)}
+
+# ENDPOINTS DE LIMPIEZA
+@app.get('/clean-cartpage-load-time')
+def clean_cartpage_load_time(db: Session = Depends(get_DB)):
+    try:
+        db.query(models.CartpageLoadInformation).delete()
+        db.commit()
+        return {'message': 'cartpage_load_time cleaned'}
+    except Exception as e:
+        db.rollback()
+        return {"error": str(e)}
+
+@app.get('/clean-product-pairs')
+def clean_product_pairs(db: Session = Depends(get_DB)):
+    try:
+        db.query(models.ProductPairAnalytics).delete()
+        db.commit()
+        return {'message': 'product_pair_analytics cleaned'}
+    except Exception as e:
+        db.rollback()
+        return {"error": str(e)}
+
+@app.get('/clean-user-android-versions')
+def clean_user_android_versions(db: Session = Depends(get_DB)):
+    try:
+        db.query(models.UserAndroidVersion).delete()
+        db.commit()
+        return {'message': 'user_android_versions cleaned'}
+    except Exception as e:
+        db.rollback()
+        return {"error": str(e)}
+
+@app.get('/clean-user-android-sdks')
+def clean_user_android_sdks(db: Session = Depends(get_DB)):
+    try:
+        db.query(models.UserAndroidSDK).delete()
+        db.commit()
+        return {'message': 'user_android_sdks cleaned'}
+    except Exception as e:
+        db.rollback()
+        return {"error": str(e)}
+
 
 
     
