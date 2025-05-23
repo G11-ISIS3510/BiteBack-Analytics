@@ -12,6 +12,8 @@ from difflib import get_close_matches
 import nltk
 from nltk.stem import WordNetLemmatizer
 from datetime import datetime
+from fastapi.responses import JSONResponse
+import numpy as np
 
 nltk.download('wordnet')
 nltk.download('omw-1.4')
@@ -366,15 +368,15 @@ async def process_clicks(db: db_dependency):
         docs_df['year'] = docs_df['timestamp'].dt.isocalendar().year
         
         # Group by category, week, and year, counting interactions
-        df_grouped = docs_df.groupby(['category-product-name', 'year', 'week']).agg(
+        df_grouped = docs_df.groupby(['category-products-name', 'year', 'week']).agg(
             click_count=('id', 'count')
         ).reset_index()
-        df_grouped = df_grouped.sort_values(by=['year', 'week', 'category-product-name'])
+        df_grouped = df_grouped.sort_values(by=['year', 'week', 'category-products-name'])
         
         # Iterate over the dataframe and update the database
         for _, row in df_grouped.iterrows():
             existing_entry = db.query(models.ClickInteraction).filter(
-                models.ClickInteraction.category_product_name == row['category-product-name'],
+                models.ClickInteraction.category_product_name == row['category-products-name'],
                 models.ClickInteraction.week == row['week'],
                 models.ClickInteraction.year == row['year']
             ).first()
@@ -382,8 +384,8 @@ async def process_clicks(db: db_dependency):
             # If the entry does not exist, insert it
             if not existing_entry:
                 new_entry = models.ClickInteraction(
-                    id=f"{row['category-product-name']}_{row['year']}_{row['week']}",
-                    category_product_name=row['category-product-name'],
+                    id=f"{row['category-products-name']}_{row['year']}_{row['week']}",
+                    category_product_name=row['category-products-name'],
                     week=row['week'],
                     year=row['year'],
                     click_count=row['click_count']
@@ -1039,4 +1041,104 @@ def setup(db: Session = Depends(get_DB)):
     except Exception as e:
         # Rollback if any error happens
         db.rollback()  
+        return {"error": str(e)}
+
+def sync_products_from_firestore(db: Session, firestore_DB):
+    docs = firestore_DB.collection('products').stream()
+    for doc in docs:
+        data = doc.to_dict()
+        product_id = doc.id
+        category = data.get('category', 'Unknown')
+
+        existing = db.query(models.Product).filter_by(product_id=product_id).first()
+        if not existing:
+            db.add(models.Product(product_id=product_id, category=category))
+        else:
+            existing.category = category
+    db.commit()
+        
+@app.get("/sync-products")
+async def sync_products(db: db_dependency):
+    try:
+        sync_products_from_firestore(db, firestore_DB)
+        return {"message": "Products synchronized successfully"}
+    except Exception as e:
+        db.rollback()
+        return {"error": str(e)}
+
+@app.get("/high-click-low-sales")
+async def high_click_low_sales(db: db_dependency):
+    try:
+        sync_products_from_firestore(db, firestore_DB)
+
+        clicks_df = pd.read_sql(db.query(models.ClickInteraction).statement, db.bind)
+        purchases_df = pd.read_sql(db.query(models.TopProductsByWeek).statement, db.bind)
+        products_df = pd.read_sql(db.query(models.Product).statement, db.bind)
+
+        if clicks_df.empty or purchases_df.empty or products_df.empty:
+            return {"message": "No sufficient data available"}
+
+        purchases_with_cat = purchases_df.merge(products_df, on="product_id", how="left")
+        purchases_grouped = purchases_with_cat.groupby("category")["quantity"].sum().reset_index()
+        clicks_grouped = clicks_df.groupby("category_product_name")["click_count"].sum().reset_index()
+
+        df = clicks_grouped.merge(purchases_grouped, left_on="category_product_name", right_on="category", how="left")
+        df["quantity"] = df["quantity"].fillna(0)
+        df["click_to_sale_ratio"] = df["click_count"] / df["quantity"].replace(0, 1)
+        df["click_to_sale_ratio"] = df["click_to_sale_ratio"].replace([float("inf"), float("-inf")], None)
+        df = df.dropna(subset=["click_to_sale_ratio"])
+        df = df[df["click_count"] > 10]
+        df["click_to_sale_ratio"] = df["click_to_sale_ratio"].round(2)
+        df["click_count"] = df["click_count"].astype(int)
+        df["quantity"] = df["quantity"].astype(int)
+
+        return df[["category_product_name", "click_count", "quantity", "click_to_sale_ratio"]].sort_values("click_to_sale_ratio", ascending=False).head(20).to_dict(orient="records")
+
+    except Exception as e:
+        db.rollback()
+        return {"error": str(e)}
+
+@app.get("/most-common-category-combinations")
+async def most_common_category_combinations(db: db_dependency):
+    try:
+        sync_products_from_firestore(db, firestore_DB)
+
+        products = db.query(models.Product).all()
+        product_to_category = {p.product_id: p.category for p in products if p.category and p.category != "Unknown"}
+
+        docs = firestore_DB.collection("purchases").stream()
+        purchase_category_combos = Counter()
+
+        for doc in docs:
+            data = doc.to_dict()
+            if not data or "products" not in data:
+                continue
+
+            categories = set()
+            for item in data["products"]:
+                pid = item.get("id")
+                if pid and pid in product_to_category:
+                    categories.add(product_to_category[pid])
+
+            if len(categories) >= 2:
+                key = tuple(sorted(categories))
+                purchase_category_combos[key] += 1
+
+        if not purchase_category_combos:
+            return {"message": "No category combinations found."}
+
+        result = [
+            {
+                "category_combination": list(combo),
+                "count": count
+            }
+            for combo, count in purchase_category_combos.items()
+        ]
+
+        result.sort(key=lambda x: x["count"], reverse=True)
+
+        return result
+
+    except Exception as e:
+        db.rollback()
         return {"error": str(e)}

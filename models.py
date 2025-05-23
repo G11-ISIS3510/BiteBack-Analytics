@@ -122,3 +122,8 @@ class UserAndroidSDK(Base):
     __tablename__ = 'user_android_sdks'
     android_sdk = Column(String, primary_key=True, index=True)
     user_count = Column(Integer, index=True)
+
+class Product(Base):
+    __tablename__ = 'products'
+    product_id = Column(String, primary_key=True, index=True)
+    category = Column(String, index=True)
